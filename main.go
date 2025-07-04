@@ -28,6 +28,18 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("241"))
 
+	statusStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("33")).
+			Bold(true)
+
+	errorStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Bold(true)
+
+	successStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("82")).
+			Bold(true)
+
 	runningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
 	stoppedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	pausedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("226"))
@@ -52,6 +64,8 @@ type model struct {
 	err        error
 	width      int
 	height     int
+	statusMsg  string
+	loading    bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -82,8 +96,51 @@ func loadContainers() tea.Msg {
 	return containersLoaded{containers}
 }
 
+func startContainer(containerID string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("docker", "start", containerID)
+		err := cmd.Run()
+		if err != nil {
+			return actionResult{success: false, message: fmt.Sprintf("Failed to start container: %v", err)}
+		}
+		return actionResult{success: true, message: fmt.Sprintf("Container %s started successfully", containerID[:12])}
+	}
+}
+
+func stopContainer(containerID string) tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("docker", "stop", containerID)
+		err := cmd.Run()
+		if err != nil {
+			return actionResult{success: false, message: fmt.Sprintf("Failed to stop container: %v", err)}
+		}
+		return actionResult{success: true, message: fmt.Sprintf("Container %s stopped successfully", containerID[:12])}
+	}
+}
+
+func deleteContainer(containerID string) tea.Cmd {
+	return func() tea.Msg {
+		// First stop the container if it's running
+		stopCmd := exec.Command("docker", "stop", containerID)
+		stopCmd.Run() // Ignore error - container might already be stopped
+
+		// Then remove it
+		cmd := exec.Command("docker", "rm", containerID)
+		err := cmd.Run()
+		if err != nil {
+			return actionResult{success: false, message: fmt.Sprintf("Failed to delete container: %v", err)}
+		}
+		return actionResult{success: true, message: fmt.Sprintf("Container %s deleted successfully", containerID[:12])}
+	}
+}
+
 type containersLoaded struct {
 	containers []Container
+}
+
+type actionResult struct {
+	success bool
+	message string
 }
 
 type errMsg struct {
@@ -201,6 +258,24 @@ func filterContainers(containers []Container, filter string) []Container {
 	return filtered
 }
 
+func (m model) getSelectedContainer() *Container {
+	if len(m.containers) == 0 {
+		return nil
+	}
+
+	filtered := filterContainers(m.containers, m.filter.Value())
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	cursor := m.table.Cursor()
+	if cursor >= len(filtered) {
+		return nil
+	}
+
+	return &filtered[cursor]
+}
+
 func (m model) updateTable() model {
 	filtered := filterContainers(m.containers, m.filter.Value())
 
@@ -242,8 +317,8 @@ func (m model) updateTableSize() model {
 
 	m.table.SetColumns(columns)
 
-	// Use most of the screen height for the table (leave space for title, filter, help)
-	tableHeight := max(10, m.height-8)
+	// Use most of the screen height for the table (leave space for title, filter, help, status)
+	tableHeight := max(10, m.height-10)
 	m.table.SetHeight(tableHeight)
 
 	return m.updateTable()
@@ -292,7 +367,53 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filtering = true
 				return m, m.filter.Focus()
 			case "r":
+				m.statusMsg = "Refreshing containers..."
+				m.loading = true
 				return m, loadContainers
+			case "s":
+				// Start container
+				container := m.getSelectedContainer()
+				if container != nil {
+					if container.State == "running" {
+						m.statusMsg = "Container is already running"
+					} else {
+						m.statusMsg = fmt.Sprintf("Starting container %s...", container.ID[:12])
+						m.loading = true
+						return m, tea.Batch(startContainer(container.ID),
+							tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+								return loadContainers()
+							}))
+					}
+				}
+				return m, nil
+			case "x":
+				// Stop container
+				container := m.getSelectedContainer()
+				if container != nil {
+					if container.State != "running" {
+						m.statusMsg = "Container is not running"
+					} else {
+						m.statusMsg = fmt.Sprintf("Stopping container %s...", container.ID[:12])
+						m.loading = true
+						return m, tea.Batch(stopContainer(container.ID),
+							tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+								return loadContainers()
+							}))
+					}
+				}
+				return m, nil
+			case "d":
+				// Delete container
+				container := m.getSelectedContainer()
+				if container != nil {
+					m.statusMsg = fmt.Sprintf("Deleting container %s...", container.ID[:12])
+					m.loading = true
+					return m, tea.Batch(deleteContainer(container.ID),
+						tea.Tick(time.Second*2, func(t time.Time) tea.Msg {
+							return loadContainers()
+						}))
+				}
+				return m, nil
 			default:
 				m.table, cmd = m.table.Update(msg)
 				return m, cmd
@@ -302,10 +423,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case containersLoaded:
 		m.containers = msg.containers
 		m = m.updateTable()
+		m.loading = false
+		if m.statusMsg == "Refreshing containers..." {
+			m.statusMsg = ""
+		}
+		return m, nil
+
+	case actionResult:
+		m.loading = false
+		m.statusMsg = msg.message
 		return m, nil
 
 	case errMsg:
 		m.err = msg.err
+		m.loading = false
 		return m, tea.Quit
 	}
 
@@ -321,7 +452,11 @@ func (m model) View() string {
 
 	// Title with container count
 	b.WriteString(titleStyle.Render("🐳 Docker Container Manager"))
-	b.WriteString(fmt.Sprintf(" (%d containers)\n\n", len(m.containers)))
+	b.WriteString(fmt.Sprintf(" (%d containers)", len(m.containers)))
+	if m.loading {
+		b.WriteString(" " + statusStyle.Render("⏳ Loading..."))
+	}
+	b.WriteString("\n\n")
 
 	// Filter input
 	if m.filtering {
@@ -333,6 +468,18 @@ func (m model) View() string {
 		b.WriteString("\n\n")
 	}
 
+	// Status message
+	if m.statusMsg != "" {
+		if strings.Contains(m.statusMsg, "successfully") {
+			b.WriteString(successStyle.Render("✓ " + m.statusMsg))
+		} else if strings.Contains(m.statusMsg, "Failed") {
+			b.WriteString(errorStyle.Render("✗ " + m.statusMsg))
+		} else {
+			b.WriteString(statusStyle.Render("ℹ " + m.statusMsg))
+		}
+		b.WriteString("\n\n")
+	}
+
 	// Table
 	b.WriteString(m.table.View())
 	b.WriteString("\n\n")
@@ -341,7 +488,7 @@ func (m model) View() string {
 	if m.filtering {
 		b.WriteString(helpStyle.Render("Enter: apply filter • Esc: cancel • Ctrl+C: quit"))
 	} else {
-		b.WriteString(helpStyle.Render("↑↓: navigate • /: filter • r: refresh • q: quit"))
+		b.WriteString(helpStyle.Render("↑↓: navigate • s: start • x: stop • d: delete • /: filter • r: refresh • q: quit"))
 	}
 	b.WriteString("\n")
 
@@ -403,3 +550,4 @@ func main() {
 		os.Exit(1)
 	}
 }
+
