@@ -159,23 +159,24 @@ func truncate(s string, max int) string {
 }
 
 func formatStatus(state string) string {
+	// Use ANSI color codes that persist through table selection
 	switch state {
 	case "running":
-		return runningStyle.Render("RUNNING")
+		return "\033[32m●\033[0m RUNNING" // Green dot
 	case "exited":
-		return stoppedStyle.Render("STOPPED")
+		return "\033[31m●\033[0m STOPPED" // Red dot
 	case "paused":
-		return pausedStyle.Render("PAUSED")
+		return "\033[33m●\033[0m PAUSED" // Yellow dot
 	case "restarting":
-		return pausedStyle.Render("RESTART")
+		return "\033[33m●\033[0m RESTART" // Yellow dot
 	case "removing":
-		return stoppedStyle.Render("REMOVING")
+		return "\033[31m●\033[0m REMOVING" // Red dot
 	case "dead":
-		return stoppedStyle.Render("DEAD")
+		return "\033[31m●\033[0m DEAD" // Red dot
 	case "created":
-		return pausedStyle.Render("CREATED")
+		return "\033[33m●\033[0m CREATED" // Yellow dot
 	default:
-		return strings.ToUpper(state)
+		return "● " + strings.ToUpper(state)
 	}
 }
 
@@ -522,13 +523,15 @@ func initialModel() model {
 		BorderStyle(lipgloss.NormalBorder()).
 		BorderForeground(lipgloss.Color("240")).
 		BorderBottom(true).
+		Foreground(lipgloss.Color("212")).
 		Bold(true).
 		Padding(0, 1) // Add padding for better spacing
 
 	s.Selected = s.Selected.
 		Foreground(lipgloss.Color("229")).
 		Background(lipgloss.Color("57")).
-		Bold(false)
+		Bold(false).
+		UnsetForeground() // Allow cell content to keep its own colors
 
 	// Add cell styling for better spacing
 	s.Cell = s.Cell.Padding(0, 1)
@@ -550,4 +553,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
